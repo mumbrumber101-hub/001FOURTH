@@ -1,0 +1,59 @@
+name: One-time guide media optimization
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/seo-media-20261112.yml']
+permissions:
+  contents: write
+concurrency:
+  group: seo-media-20261112
+  cancel-in-progress: false
+jobs:
+  optimize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+      - name: Preserve content and externalize media
+        shell: bash
+        run: |
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import base64,hashlib,html,json,re,subprocess
+          p=Path('index.html'); original=p.read_bytes()
+          expected='63ff8d0f813eebad79557228fae8d1a58709fc31'
+          actual=hashlib.sha1(b'blob '+str(len(original)).encode()+b'\0'+original).hexdigest()
+          assert actual==expected, 'Source changed; refusing to overwrite concurrent edits'
+          pat=re.compile(rb'data:([^;,\s]+);base64,([A-Za-z0-9+/=\r\n]+)')
+          exts={'image/png':'png','image/jpeg':'jpg','image/webp':'webp','audio/mpeg':'mp3'}
+          assets={};reverse={}
+          def externalize(m):
+           mime=m[1].decode(); assert mime in exts, mime
+           data=base64.b64decode(re.sub(rb'\s+',b'',m[2]),validate=True)
+           digest=hashlib.sha256(data).hexdigest(); path='assets/'+digest+'.'+exts[mime]
+           target=Path(path); target.parent.mkdir(exist_ok=True)
+           if target.exists(): assert target.read_bytes()==data, 'Asset collision'
+           target.write_bytes(data); reverse[path.encode()]=m[0]; assets[path]=digest
+           return path.encode()
+          changed=pat.sub(externalize,original)
+          assert assets, 'No media to externalize'
+          assert re.search(rb'<meta[^>]+name=[\"\']description',changed,re.I), 'Existing metadata missing'
+          # Preserve the freshly published title and all metadata verbatim.
+          restored=changed
+          for path,uri in reverse.items(): restored=restored.replace(path,uri)
+          body=lambda b:re.search(rb'<body\b[^>]*>.*',b,re.I|re.S).group()
+          assert body(restored)==body(original), 'Body source changed'
+          assert len(changed)<1500000, 'HTML remains too large'
+          assert not pat.search(changed), 'Embedded media remains'
+          p.write_bytes(changed)
+          subprocess.run(['git','add','--','index.html']+sorted(assets),check=True)
+          print(json.dumps({'beforeBytes':len(original),'afterBytes':len(changed),'assets':assets,'bodyBytesPreserved':True},sort_keys=True))
+          PYCODE
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git diff --cached --stat
+          git commit -m 'Keep guide content crawlable by externalizing media'
+          git push origin HEAD:main
